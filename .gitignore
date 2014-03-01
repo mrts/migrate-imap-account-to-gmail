@@ -1,0 +1,4 @@
+*.swp
+*.pyc
+conf.py
+venv/
