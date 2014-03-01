@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# encoding: utf-8
 """
 Script that copies mail from a Dovecot IMAP server account to a GMail account.
 
@@ -21,6 +22,9 @@ TARGET = {
 
 from __future__ import unicode_literals
 import time
+import email
+from email.generator import Generator as EmailGenerator
+from cStringIO import StringIO
 
 from imapclient import IMAPClient
 
@@ -42,15 +46,16 @@ def main():
 
     for folder in source_account.list_folders():
         print("Synchronizing folder '%s'" % folder)
-        start = time.clock()
-        target_account.create_folder(folder)
+        start = time.time()
+        target_folder = target_account.create_folder(folder)
         folder_info = source_account.select_folder(folder)
         print("\tcontains %s messages" % folder_info['EXISTS'])
         messages = source_account.fetch_messages()
-        for message, size in messages:
-            print("\t\tuploading message of %s bytes" % size)
-            target_account.append(folder, message)
-        end = time.clock()
+        for message, flags, size in messages:
+            print("\t\tuploading message of %s bytes to '%s'" %
+                    (size, target_folder))
+            target_account.append(target_folder, to_message(message), flags)
+        end = time.time()
         print("\t'%s' done, took %s seconds" % (folder, end - start))
 
 class Base(object):
@@ -64,48 +69,58 @@ class Base(object):
         return "<user: %s | host: %s>" % (self.username, self.host)
 
 class Source(Base):
-    SPECIAL_FOLDERS_REMAP = {
-        u'Drafts': u'special_folders.drafts',
-        u'Junk': u'special_folders.junk',
-        u'Sent': u'special_folders.sent',
-        u'Trash': u'special_folders.trash',
-        u'INBOX': u'special_folders.inbox',
-        u'INBOX.Drafts': u'special_folders.inbox.drafts',
-        u'INBOX.Junk': u'special_folders.inbox.junk',
-        u'INBOX.Sent': u'special_folders.inbox.sent',
-        u'INBOX.Trash': u'special_folders.inbox.trash',
-        u'Mail.Drafts': u'special_folders.mail.drafts',
-        u'Mail.Junk': u'special_folders.mail.junk',
-        u'Mail.Sent': u'special_folders.mail.sent',
-        u'Mail.Trash': u'special_folders.mail.trash',
-    }
-
     def list_folders(self):
-        for flags, root, folder in self.server.list_folders():
-            if folder in self.SPECIAL_FOLDERS_REMAP:
-                folder = self.SPECIAL_FOLDERS_REMAP[folder]
-            yield folder
-            raise StopIteration
+        return (folderinfo[2] for folderinfo in self.server.list_folders())
 
     def select_folder(self, folder):
         return self.server.select_folder(folder)
 
     def fetch_messages(self):
         messages = self.server.search(['NOT DELETED'])
-        # ['FLAGS'] and pass flags to target account?
-        response = self.server.fetch(messages, ['RFC822', 'RFC822.SIZE'])
-        for msgid, data in response.iteritems():
-            yield data['RFC822'], data['RFC822.SIZE']
+        response = self.server.fetch(messages,
+                ['FLAGS', 'RFC822', 'RFC822.SIZE'])
+        return ((data['RFC822'], data['FLAGS'], data['RFC822.SIZE'])
+                for msgid, data in response.iteritems())
 
 class Target(Base):
-    def create_folder(self, folder):
-        pass
-        # folder = folder.replace('.', '/')
-        # self.server.create_folder(folder)
+    SPECIAL_FOLDERS_REMAP = {
+        u'Drafts': u'specialfolders/drafts',
+        u'Junk': u'specialfolders/junk',
+        u'Sent': u'specialfolders/sent',
+        u'Trash': u'specialfolders/trash',
+        u'INBOX': u'specialfolders/inbox',
+        u'INBOX/Drafts': u'specialfolders/inbox/drafts',
+        u'INBOX/Junk': u'specialfolders/inbox/junk',
+        u'INBOX/Sent': u'specialfolders/inbox/sent',
+        u'INBOX/Trash': u'specialfolders/inbox/trash',
+        u'Mail/Drafts': u'specialfolders/mail/drafts',
+        u'Mail/Junk': u'specialfolders/mail/junk',
+        u'Mail/Sent': u'specialfolders/mail/sent',
+        u'Mail/Trash': u'specialfolders/mail/trash',
+    }
+    specialfolders_created = False
 
-    def append(self, folder, message):
-        pass
-        # self.server.append(folder, message)
+    def create_folder(self, folder):
+        folder = folder.replace('.', '/')
+        if folder in self.SPECIAL_FOLDERS_REMAP:
+            folder = self.SPECIAL_FOLDERS_REMAP[folder]
+            if not self.specialfolders_created:
+                self.server.create_folder('specialfolders')
+                self.server.create_folder('specialfolders/inbox')
+                self.server.create_folder('specialfolders/mail')
+                self.specialfolders_created = True
+        self.server.create_folder(folder)
+        return folder
+
+    def append(self, folder, message, flags):
+        self.server.append(folder, message, flags)
+
+def to_message(message):
+    message = email.message_from_string(message.encode('utf-8'))
+    strio = StringIO()
+    g = EmailGenerator(strio, mangle_from_=False, maxheaderlen=0)
+    g.flatten(message)
+    return strio.getvalue()
 
 if __name__ == '__main__':
     main()
