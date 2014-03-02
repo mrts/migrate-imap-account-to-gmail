@@ -3,7 +3,7 @@
 """
 Script that copies mail from a Dovecot IMAP server account to a GMail account.
 
-`pip install imapclient` and create `conf.py` as follows to use it:
+`pip install imapclient six` and create `conf.py` as follows to use it:
 
 SOURCE = {
     'HOST': 'example.com',
@@ -24,8 +24,9 @@ from __future__ import unicode_literals
 import time
 import email
 import sqlite3
+import re
 from email.generator import Generator as EmailGenerator
-from cStringIO import StringIO
+from six.moves import input, cStringIO
 
 from imapclient import IMAPClient
 
@@ -35,7 +36,7 @@ def main():
     source_account = Source(conf.SOURCE)
     target_account = Target(conf.TARGET)
 
-    yes = raw_input("Copy all mail\n"
+    yes = input("Copy all mail\n"
             "from account\n"
             "\t%s\n"
             "to account\n"
@@ -59,10 +60,10 @@ def main():
                 print("\t\tskipping message '%s', already uploaded to '%s'" %
                         (message_id, target_folder))
                 continue
-            message, flags, size = source_account.fetch_message(message_id)
+            msg, flags, size, date = source_account.fetch_message(message_id)
             print("\t\tuploading message '%s' of %s bytes to '%s'" %
                     (message_id, size, target_folder))
-            target_account.append(target_folder, to_message(message), flags)
+            target_account.append(target_folder, to_message(msg), flags, date)
             db.mark_message_seen(target_folder, message_id)
         end = time.time()
         print("\t'%s' done, took %s seconds" % (folder, end - start))
@@ -90,10 +91,11 @@ class Source(Base):
 
     def fetch_message(self, message_id):
         response = self.server.fetch((message_id,),
-                ['FLAGS', 'RFC822', 'RFC822.SIZE'])
+                ['FLAGS', 'RFC822', 'RFC822.SIZE', 'INTERNALDATE'])
         assert len(response) == 1
         data = response[message_id]
-        return (data['RFC822'], data['FLAGS'], data['RFC822.SIZE'])
+        return (data['RFC822'], data['FLAGS'],
+                data['RFC822.SIZE'], data['INTERNALDATE'])
 
 class Target(Base):
     SPECIAL_FOLDERS_REMAP = {
@@ -124,8 +126,8 @@ class Target(Base):
             self.server.create_folder(folder)
         return folder
 
-    def append(self, folder, message, flags):
-        self.server.append(folder, message, flags)
+    def append(self, folder, message, flags, date):
+        self.server.append(folder, message, flags, date)
 
 class Database(object):
     def __init__(self):
@@ -153,11 +155,20 @@ class Database(object):
         self.connection.close()
 
 def to_message(message):
-    message = email.message_from_string(message.encode('utf-8'))
-    strio = StringIO()
+    encoding = find_first_encoding(message)
+    try:
+        message = email.message_from_string(message.encode(encoding))
+    except UnicodeEncodeError:
+        message = email.message_from_string('utf-8')
+    strio = cStringIO()
     g = EmailGenerator(strio, mangle_from_=False, maxheaderlen=0)
     g.flatten(message)
     return strio.getvalue()
+
+ENCODING_RE=re.compile(r"charset=([-\w]+);")
+def find_first_encoding(message):
+    match = ENCODING_RE.search(message)
+    return match.group(1) if match else 'utf-8'
 
 if __name__ == '__main__':
     main()
