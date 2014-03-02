@@ -1,4 +1,5 @@
 *.swp
 *.pyc
+*.sqlite
 conf.py
 venv/

@@ -23,6 +23,7 @@ TARGET = {
 from __future__ import unicode_literals
 import time
 import email
+import sqlite3
 from email.generator import Generator as EmailGenerator
 from cStringIO import StringIO
 
@@ -44,19 +45,28 @@ def main():
         print("Didn't enter 'yes', exiting")
         return
 
+    db = Database()
+    db.create_tables()
+
     for folder in source_account.list_folders():
         print("Synchronizing folder '%s'" % folder)
         start = time.time()
         target_folder = target_account.create_folder(folder)
         folder_info = source_account.select_folder(folder)
         print("\tcontains %s messages" % folder_info['EXISTS'])
-        messages = source_account.fetch_messages()
-        for message, flags, size in messages:
-            print("\t\tuploading message of %s bytes to '%s'" %
-                    (size, target_folder))
+        for message_id in source_account.fetch_message_ids():
+            if db.is_message_seen(target_folder, message_id):
+                print("\t\tskipping message '%s', already uploaded to '%s'" %
+                        (message_id, target_folder))
+                continue
+            message, flags, size = source_account.fetch_message(message_id)
+            print("\t\tuploading message '%s' of %s bytes to '%s'" %
+                    (message_id, size, target_folder))
             target_account.append(target_folder, to_message(message), flags)
+            db.mark_message_seen(target_folder, message_id)
         end = time.time()
         print("\t'%s' done, took %s seconds" % (folder, end - start))
+    db.close()
 
 class Base(object):
     def __init__(self, conf):
@@ -75,12 +85,15 @@ class Source(Base):
     def select_folder(self, folder):
         return self.server.select_folder(folder)
 
-    def fetch_messages(self):
-        messages = self.server.search(['NOT DELETED'])
-        response = self.server.fetch(messages,
+    def fetch_message_ids(self):
+        return self.server.search(['NOT DELETED'])
+
+    def fetch_message(self, message_id):
+        response = self.server.fetch((message_id,),
                 ['FLAGS', 'RFC822', 'RFC822.SIZE'])
-        return ((data['RFC822'], data['FLAGS'], data['RFC822.SIZE'])
-                for msgid, data in response.iteritems())
+        assert len(response) == 1
+        data = response[message_id]
+        return (data['RFC822'], data['FLAGS'], data['RFC822.SIZE'])
 
 class Target(Base):
     SPECIAL_FOLDERS_REMAP = {
@@ -98,22 +111,46 @@ class Target(Base):
         u'Mail/Sent': u'specialfolders/mail/sent',
         u'Mail/Trash': u'specialfolders/mail/trash',
     }
-    specialfolders_created = False
 
     def create_folder(self, folder):
         folder = folder.replace('.', '/')
         if folder in self.SPECIAL_FOLDERS_REMAP:
             folder = self.SPECIAL_FOLDERS_REMAP[folder]
-            if not self.specialfolders_created:
-                self.server.create_folder('specialfolders')
-                self.server.create_folder('specialfolders/inbox')
-                self.server.create_folder('specialfolders/mail')
-                self.specialfolders_created = True
-        self.server.create_folder(folder)
+            for parent in ('specialfolders',
+                    'specialfolders/inbox','specialfolders/mail'):
+                if not self.server.folder_exists(parent):
+                    self.server.create_folder(parent)
+        if not self.server.folder_exists(folder):
+            self.server.create_folder(folder)
         return folder
 
     def append(self, folder, message, flags):
         self.server.append(folder, message, flags)
+
+class Database(object):
+    def __init__(self):
+        self.connection = sqlite3.connect(__file__ + ".sqlite")
+
+    def create_tables(self):
+        with self.connection:
+            self.connection.execute("CREATE TABLE IF NOT EXISTS "
+                    "seen_messages (folder text, msgid number)")
+            self.connection.execute("CREATE INDEX IF NOT EXISTS "
+                    "seen_messages_idx ON seen_messages (folder, msgid)")
+
+    def mark_message_seen(self, message_id, target_folder):
+        with self.connection:
+            self.connection.execute("INSERT INTO seen_messages VALUES (?, ?)",
+                    (target_folder, message_id))
+
+    def is_message_seen(self, message_id, target_folder):
+        with self.connection:
+            return self.connection.execute("SELECT 1 FROM seen_messages "
+                    "WHERE folder=? AND msgid=? LIMIT 1",
+                    (target_folder, message_id)).fetchone()
+
+    def close(self):
+        self.connection.close()
 
 def to_message(message):
     message = email.message_from_string(message.encode('utf-8'))
