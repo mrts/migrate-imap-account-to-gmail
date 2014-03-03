@@ -10,7 +10,7 @@ Usage
 
 1. Install dependencies:
 
-        pip install six imapclient
+        pip install six https://bitbucket.org/mrts/imapclient/get/default.zip
 
 1. Create configuration:
 

@@ -3,7 +3,7 @@
 """
 Script that copies mail from a Dovecot IMAP server account to a GMail account.
 
-`pip install imapclient six` and create `conf.py` as follows to use it:
+`pip install https://bitbucket.org/mrts/imapclient/get/default.zip six` and create `conf.py` as follows to use it:
 
 SOURCE = {
     'HOST': 'example.com',
@@ -26,7 +26,7 @@ import email
 import sqlite3
 import re
 from email.generator import Generator as EmailGenerator
-from six.moves import input, cStringIO
+from six.moves import input
 
 from imapclient import IMAPClient
 
@@ -63,7 +63,7 @@ def main():
             msg, flags, size, date = source_account.fetch_message(message_id)
             print("\t\tuploading message '%s' of %s bytes to '%s'" %
                     (message_id, size, target_folder))
-            target_account.append(target_folder, to_message(msg), flags, date)
+            target_account.append(target_folder, msg, flags, date)
             db.mark_message_seen(target_folder, message_id)
         end = time.time()
         print("\t'%s' done, took %s seconds" % (folder, end - start))
@@ -91,7 +91,8 @@ class Source(Base):
 
     def fetch_message(self, message_id):
         response = self.server.fetch((message_id,),
-                ['FLAGS', 'RFC822', 'RFC822.SIZE', 'INTERNALDATE'])
+                ['FLAGS', 'RFC822', 'RFC822.SIZE', 'INTERNALDATE'],
+                do_decode=False)
         assert len(response) == 1
         data = response[message_id]
         return (data['RFC822'], data['FLAGS'],
@@ -127,7 +128,7 @@ class Target(Base):
         return folder
 
     def append(self, folder, message, flags, date):
-        self.server.append(folder, message, flags, date)
+        self.server.append(folder, message, flags, date, do_encode=False)
 
 class Database(object):
     def __init__(self):
@@ -154,21 +155,14 @@ class Database(object):
     def close(self):
         self.connection.close()
 
-def to_message(message):
-    encoding = find_first_encoding(message)
-    try:
-        message = email.message_from_string(message.encode(encoding))
-    except UnicodeEncodeError:
-        message = email.message_from_string('utf-8')
-    strio = cStringIO()
-    g = EmailGenerator(strio, mangle_from_=False, maxheaderlen=0)
-    g.flatten(message)
-    return strio.getvalue()
+# Wrap sys.stdout into a StreamWriter to allow writing unicode in case of
+# redirection.
+# See http://stackoverflow.com/questions/4545661/unicodedecodeerror-when-redirecting-to-file
+import codecs
+import locale
+import sys
 
-ENCODING_RE=re.compile(r"charset=([-\w]+);")
-def find_first_encoding(message):
-    match = ENCODING_RE.search(message)
-    return match.group(1) if match else 'utf-8'
+sys.stdout = codecs.getwriter(locale.getpreferredencoding())(sys.stdout)
 
 if __name__ == '__main__':
     main()
