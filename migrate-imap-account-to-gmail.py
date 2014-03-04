@@ -22,6 +22,7 @@ TARGET = {
 
 from __future__ import unicode_literals
 import time
+import datetime
 import email
 import sqlite3
 import re
@@ -49,9 +50,12 @@ def main():
     db = Database()
     db.create_tables()
 
+    total_sync_start = time.time()
+    total_messages = 0
+
     for folder in source_account.list_folders():
         print("Synchronizing folder '%s'" % folder)
-        start = time.time()
+        folder_sync_start = time.time()
         target_folder = target_account.create_folder(folder)
         folder_info = source_account.select_folder(folder)
         print("\tcontains %s messages" % folder_info['EXISTS'])
@@ -65,8 +69,14 @@ def main():
                     (message_id, size, target_folder))
             target_account.append(target_folder, msg, flags, date)
             db.mark_message_seen(target_folder, message_id)
-        end = time.time()
-        print("\t'%s' done, took %s seconds" % (folder, end - start))
+            total_messages += 1
+        print("\t'%s' done, took %s seconds, %d total messages uploaded" %
+                (folder, time.time() - folder_sync_start, total_messages))
+
+    run_duration = datetime.timedelta(seconds=time.time() - total_sync_start)
+    print("Synchronization of %d messages finished, took %s" %
+            (total_messages, run_duration))
+
     db.close()
 
 class Base(object):
