@@ -81,7 +81,7 @@ class Base(object):
 
 class Source(Base):
     def list_folders(self):
-        return (folderinfo[2] for folderinfo in self.server.list_folders())
+        return sorted(folderinfo[2] for folderinfo in self.server.list_folders())
 
     def select_folder(self, folder):
         return self.server.select_folder(folder)
