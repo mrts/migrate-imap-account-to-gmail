@@ -52,6 +52,7 @@ def main():
 
     total_sync_start = time.time()
     total_messages = 0
+    total_bytes = 0
 
     for folder in source_account.list_folders():
         print("Synchronizing folder '%s'" % folder)
@@ -70,12 +71,13 @@ def main():
             target_account.append(target_folder, msg, flags, date)
             db.mark_message_seen(target_folder, message_id)
             total_messages += 1
+            total_bytes += size
         print("\t'%s' done, took %s seconds, %d total messages uploaded" %
                 (folder, time.time() - folder_sync_start, total_messages))
 
     run_duration = datetime.timedelta(seconds=time.time() - total_sync_start)
-    print("Synchronization of %d messages finished, took %s" %
-            (total_messages, run_duration))
+    print("Synchronization of %d messages (%s bytes) finished, took %s" %
+            (total_messages, total_bytes, run_duration))
 
     db.close()
 
