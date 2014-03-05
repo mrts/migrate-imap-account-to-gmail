@@ -1,15 +1,22 @@
 #!/usr/bin/env python
 # encoding: utf-8
 """
-Script that copies mail from a Dovecot IMAP server account to a GMail account.
+Script that copies mail from one IMAP account to another.
 
-`pip install https://bitbucket.org/mrts/imapclient/get/default.zip six` and create `conf.py` as follows to use it:
+Has been used to migrate more than 10 000 messages from a Dovecot server to
+GMail.
+
+`pip install https://bitbucket.org/mrts/imapclient/get/default.zip six` and
+create `conf.py` as follows to use it:
 
 SOURCE = {
     'HOST': 'example.com',
     'USERNAME': 'user',
     'PASSWORD': 'password',
     'SSL': True,
+    'IGNORE_FOLDERS': ('[Gmail]',
+                       '[Gmail]/Trash', '[Gmail]/Spam',
+                       '[Gmail]/Starred', '[Gmail]/Important')
 }
 
 TARGET = {
@@ -17,6 +24,7 @@ TARGET = {
     'USERNAME': 'user@gmail.com',
     'PASSWORD': 'password',
     'SSL': True,
+    'ROOT_FOLDER': 'example-com-archive'
 }
 """
 
@@ -59,6 +67,9 @@ def main():
         folder_sync_start = time.time()
         target_folder = target_account.create_folder(folder)
         folder_info = source_account.select_folder(folder)
+        if folder_info is None:
+            print("\t'%s' is in ignored folders, skipping" % folder)
+            continue
         print("\tcontains %s messages" % folder_info['EXISTS'])
         for message_id in source_account.fetch_message_ids():
             if db.is_message_seen(target_folder, message_id):
@@ -95,10 +106,16 @@ class Base(object):
         return self.server.namespace()[0][0][1]
 
 class Source(Base):
+    def __init__(self, conf):
+        super(Source, self).__init__(conf)
+        self.ignore_folders = conf['IGNORE_FOLDERS']
+
     def list_folders(self):
         return sorted(folderinfo[2] for folderinfo in self.server.list_folders())
 
     def select_folder(self, folder):
+        if folder in self.ignore_folders:
+            return None
         return self.server.select_folder(folder)
 
     def fetch_message_ids(self):
@@ -112,6 +129,7 @@ class Source(Base):
         data = response[message_id]
         return (data['RFC822'], data['FLAGS'],
                 data['RFC822.SIZE'], data['INTERNALDATE'])
+
 
 class Target(Base):
     def __init__(self, conf, source_folder_separator):
@@ -133,6 +151,7 @@ class Target(Base):
 
     def append(self, folder, message, flags, date):
         self.server.append(folder, message, flags, date, do_encode=False)
+
 
 class Database(object):
     def __init__(self):
