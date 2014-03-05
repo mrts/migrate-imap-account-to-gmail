@@ -168,12 +168,12 @@ class Database(object):
             self.connection.execute("CREATE INDEX IF NOT EXISTS "
                     "seen_messages_idx ON seen_messages (folder, msgid)")
 
-    def mark_message_seen(self, message_id, target_folder):
+    def mark_message_seen(self, target_folder, message_id):
         with self.connection:
             self.connection.execute("INSERT INTO seen_messages VALUES (?, ?)",
                     (target_folder, message_id))
 
-    def is_message_seen(self, message_id, target_folder):
+    def is_message_seen(self, target_folder, message_id):
         with self.connection:
             return self.connection.execute("SELECT 1 FROM seen_messages "
                     "WHERE folder=? AND msgid=? LIMIT 1",
