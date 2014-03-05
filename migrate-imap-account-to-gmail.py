@@ -35,7 +35,7 @@ import conf
 
 def main():
     source_account = Source(conf.SOURCE)
-    target_account = Target(conf.TARGET)
+    target_account = Target(conf.TARGET, source_account.folder_separator())
 
     yes = input("Copy all mail\n"
             "from account\n"
@@ -89,6 +89,9 @@ class Base(object):
     def __str__(self):
         return "<user: %s | host: %s>" % (self.username, self.host)
 
+    def folder_separator(self):
+        return self.server.namespace()[0][0][1]
+
 class Source(Base):
     def list_folders(self):
         return sorted(folderinfo[2] for folderinfo in self.server.list_folders())
@@ -109,30 +112,19 @@ class Source(Base):
                 data['RFC822.SIZE'], data['INTERNALDATE'])
 
 class Target(Base):
-    SPECIAL_FOLDERS_REMAP = {
-        u'Drafts': u'specialfolders/drafts',
-        u'Junk': u'specialfolders/junk',
-        u'Sent': u'specialfolders/sent',
-        u'Trash': u'specialfolders/trash',
-        u'INBOX': u'specialfolders/inbox',
-        u'INBOX/Drafts': u'specialfolders/inbox/drafts',
-        u'INBOX/Junk': u'specialfolders/inbox/junk',
-        u'INBOX/Sent': u'specialfolders/inbox/sent',
-        u'INBOX/Trash': u'specialfolders/inbox/trash',
-        u'Mail/Drafts': u'specialfolders/mail/drafts',
-        u'Mail/Junk': u'specialfolders/mail/junk',
-        u'Mail/Sent': u'specialfolders/mail/sent',
-        u'Mail/Trash': u'specialfolders/mail/trash',
-    }
+    def __init__(self, conf, source_folder_separator):
+        super(Target, self).__init__(conf)
+        self.root_folder = conf['ROOT_FOLDER']
+        self.source_folder_separator = source_folder_separator
+        self.target_folder_separator = self.folder_separator()
+        if not self.server.folder_exists(self.root_folder):
+            self.server.create_folder(self.root_folder)
 
     def create_folder(self, folder):
-        folder = folder.replace('.', '/')
-        if folder in self.SPECIAL_FOLDERS_REMAP:
-            folder = self.SPECIAL_FOLDERS_REMAP[folder]
-            for parent in ('specialfolders',
-                    'specialfolders/inbox','specialfolders/mail'):
-                if not self.server.folder_exists(parent):
-                    self.server.create_folder(parent)
+        if self.source_folder_separator != self.target_folder_separator:
+            folder = folder.replace(self.source_folder_separator,
+                    self.target_folder_separator)
+        folder = self.root_folder + self.target_folder_separator + folder
         if not self.server.folder_exists(folder):
             self.server.create_folder(folder)
         return folder
