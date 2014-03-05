@@ -140,6 +140,10 @@ class Target(Base):
         if not self.server.folder_exists(self.root_folder):
             self.server.create_folder(self.root_folder)
 
+    def __str__(self):
+        s = super(Target, self).__str__()
+        return s.replace('>', ' | root folder: %s>' % self.root_folder)
+
     def create_folder(self, folder):
         if self.source_folder_separator != self.target_folder_separator:
             folder = folder.replace(self.source_folder_separator,
