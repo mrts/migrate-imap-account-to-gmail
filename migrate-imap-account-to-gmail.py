@@ -141,12 +141,11 @@ class Source(Base):
         return self.server.select_folder(folder)
 
     def fetch_message_ids(self):
-        return self.server.search(['NOT DELETED'])
+        return self.server.search([b'NOT', b'DELETED'])
 
     def fetch_message(self, message_id):
         response = self.server.fetch((message_id,),
-                ['FLAGS', 'RFC822', 'RFC822.SIZE', 'INTERNALDATE'],
-                do_decode=False)
+                ['FLAGS', 'RFC822', 'RFC822.SIZE', 'INTERNALDATE'])
         if options.verbose: print str(len(response)) + " : " + str(message_id)
 #        assert len(response) == 1
         data = response[message_id]
@@ -190,7 +189,7 @@ class Target(Base):
         return folder
 
     def append(self, folder, message, flags, date):
-        self.server.append(folder, message, flags, date, do_encode=False)
+        self.server.append(folder, message, flags, date)
 
 
 class Database(object):
