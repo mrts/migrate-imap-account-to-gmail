@@ -3,3 +3,12 @@
 *.sqlite
 conf.py
 venv/
+.venv/
+__pycache__/
+accounts.json
+logs/
+overnight.log
+*.sqlite-*
+*.sqlite.lock
+*.sqlite.repair-*.bak
+.env

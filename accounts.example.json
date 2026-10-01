@@ -1,0 +1,22 @@
+{
+  "target": {
+    "host": "imap.gmail.com",
+    "email": "your-account@gmail.com",
+    "password": "",
+    "root": "Migration"
+  },
+  "sources": [
+    {
+      "host": "imap.example.com",
+      "email": "first@example.com",
+      "password": "",
+      "ignore_folders": []
+    },
+    {
+      "host": "imap.example.com",
+      "email": "second@example.com",
+      "password": "",
+      "ignore_folders": []
+    }
+  ]
+}
