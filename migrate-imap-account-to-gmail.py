@@ -475,6 +475,14 @@ def copy_account(client, destination_client, source, target, db, args, report):
         validity, metadata = snapshot(client, folder)
         db.check_validity(source["id"], folder, validity)
         before = None  # Local to this folder and connection attempt.
+        saved = [row for row in db.rows(source["id"])
+                 if row["destination"] == destination and row["status"] == "uploaded"]
+        if saved:
+            if not destination_client.folder_exists(destination):
+                raise StopMigration("Previously uploaded destination folder is missing; manual reconciliation required.")
+            before = destination_client.select_folder(destination, readonly=True)
+            if any(row["target_validity"] != int(before[b"UIDVALIDITY"]) for row in saved):
+                raise StopMigration("Destination UIDVALIDITY changed; manual reconciliation required.")
         for uid in metadata:
             copy_check(args)
             key = (source["id"], folder, validity, uid)
@@ -680,17 +688,12 @@ def reconcile(destination_client, db, accounts, args, report, automatic=False):
             db.uploaded(key, int(info[b"UIDVALIDITY"]), matches[0])
             report["reconciled"] += 1
             event("reconciled", account=row["account"], folder=row["folder"], uid=row["uid"])
-        elif not matches and automatic and info and row["before_validity"] is not None and row["before_uidnext"] is not None and (
-                int(info.get(b"UIDNEXT", -1)) == row["before_uidnext"]):
-            # UIDNEXT never goes backwards: the server assigned no UID to this
-            # attempt. With the old connection closed, it is safe to reattempt.
-            db.delete_pending(key)
-            event("retry_safe", account=row["account"], folder=row["folder"], uid=row["uid"],
-                  reason="unchanged destination UIDVALIDITY and UIDNEXT")
         elif not matches and args.retry_missing and not automatic:
             db.delete_pending(key)
             event("retry_authorized", account=row["account"], folder=row["folder"], uid=row["uid"])
         else:
+            # A closed socket and unchanged UIDNEXT cannot prove that the old
+            # server-side APPEND has finished. Preserve the uncertain attempt.
             report["problems"] += 1
             event("unresolved_upload", account=row["account"], folder=row["folder"], uid=row["uid"],
                   matches=len(matches))
@@ -881,6 +884,10 @@ def repair_account(client, gmail, source, target, db, args, report, candidates, 
         row = rows[0]
         key = row_key(row)
         destination = row["destination"]
+        if any(other["destination"] == destination and other["status"] == "pending"
+               for other in db.rows()):
+            finish("ambiguous", "Destination has unresolved pending uploads; reconcile them before repair.")
+            continue
         if mapped.get(folder) != destination:
             finish("ambiguous", "Source folder is excluded, missing, or mapped to a different label.")
             continue

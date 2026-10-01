@@ -29,7 +29,7 @@ pip install -r requirements.txt
 cp accounts.example.json accounts.json
 ```
 
-Edit `accounts.json`: enter your Gmail address and all 19 source accounts.
+Edit `accounts.json`: enter your Gmail address and all source accounts.
 Each account uses one `email` field. For sources, this is also the account ID,
 IMAP login username, and Gmail label. Enter passwords directly in `password`:
 
@@ -41,8 +41,7 @@ IMAP login username, and Gmail label. Enter passwords directly in `password`:
 }
 ```
 
-Use a Gmail **app password** for the target's `password`, with 2-Step Verification
-if your account supports it; your ordinary Google password will not work. See
+Use a Gmail **app password** for the target's `password`, your ordinary Google password will not work. See
 [Google's app-password instructions](https://support.google.com/accounts/answer/185833).
 Fill in the blank passwords before connecting. Inventory needs only source
 passwords; the target password can remain blank until copying or verifying.
@@ -50,16 +49,13 @@ passwords; the target password can remain blank until copying or verifying.
 private since it contains passwords; for example, `chmod 600 accounts.json`.
 Passwords are never written to logs or reports.
 
-OAuth is not implemented. All connections use TLS with certificate verification,
+All connections use TLS with certificate verification,
 port 993 by default. A source can override `port` for another implicit-TLS port.
 IMAP reads/writes, including large uploads, have a 600-second timeout by default;
 connection setup has a separate 60-second timeout. Change these for all accounts
 with `--timeout 1200 --connect-timeout 60`, for example. The selected timeouts are
 recorded in operation logs and reports. This allows large messages to finish
 without extending the wait for an unreachable server.
-The old `username`/`id`/`label` configuration still works. As an optional alternative
-to a direct password, use `password_env` to name an environment variable. If both
-are supplied, the direct `password` takes precedence.
 
 Spam/Trash detection uses IMAP `\\Junk`/`\\Trash` special-use flags plus common names
 (Spam, Trash, Junk, Junk E-mail, Deleted Items, Deleted Messages, Bin), ignoring
@@ -158,12 +154,14 @@ not automatically retry their reads.
 Each upload is journaled before APPEND, including destination UIDVALIDITY and
 UIDNEXT. If a connection drops during APPEND, the next attempt first reconciles
 that pending record. An exact, unclaimed match among newly assigned destination
-UIDs is recorded as accepted. If UIDVALIDITY and UIDNEXT are unchanged on the
-fresh connection, no UID was assigned, so the pending attempt can be retried.
-Changed UID validity, unmatched newly assigned UIDs, missing labels, or ambiguous
-matches require manual review. Existing pending records from before this upgrade
-have no UID baseline: an exact match can recover them, but an unmatched one still
-needs manual confirmation. The database schema upgrades automatically while
+UIDs is recorded as accepted. An unmatched pending upload remains uncertain even
+if UIDVALIDITY and UIDNEXT are unchanged: the original server-side APPEND may
+still complete after its socket closes. Automatic recovery never clears that
+record or sends another APPEND merely because the baseline is unchanged.
+Changed UID validity, missing labels, unmatched uploads, and ambiguous matches
+require review. Existing pending records from before this upgrade have no UID
+baseline: an exact match can recover them, but an unmatched one still needs
+manual confirmation. The database schema upgrades automatically while
 preserving saved messages. Do not move/delete imported messages during recovery.
 
 An unresolved upload or exhausted source retries marks that account failed and
@@ -180,7 +178,7 @@ retried. The attempt budget prevents permanent failures from looping indefinitel
 
 ### Gmail throttling
 
-During the personal-Gmail migration, Gmail returned
+During a Gmail migration, Gmail returned
 `append failed: System Error (Failure) [THROTTLED]`. This is an explicit server
 rejection, distinct from a socket timeout. Command latency also increased during
 the run, but slow responses alone do not prove throttling or reveal its cause.
@@ -230,7 +228,10 @@ reported problem and rerun `copy`; confirmed uploads will be skipped.
 
 Use the same `migration.sqlite` throughout (or always pass the same `--state`).
 Do not delete it to retry. Account identity, destination root/label, and source
-UID validity are checked against saved state. Changes require investigation rather
+UID validity are checked against saved state. Saved destination UIDVALIDITY is
+checked once per copied folder before skipping or extending its uploaded records;
+missing or recreated labels stop that account for manual reconciliation.
+Changes require investigation rather
 than silently starting over. One process can hold the state-file lock at a time;
 do not bypass this by starting concurrent copies with different state files.
 The old script's `.py.sqlite` database is not compatible. This version refuses to
@@ -252,13 +253,13 @@ python migrate-imap-account-to-gmail.py reconcile
 This reads Gmail and looks for an exact content hash match in the intended label
 (and, when journaled, among UIDs assigned after the upload started).
 One unclaimed match is recorded as uploaded. Zero or ambiguous matches remain
-pending and return a nonzero exit code. During automatic copying, an unchanged
-UID baseline may permit safe retry; otherwise that source requires manual review.
-Reconciliation may download
+pending and return a nonzero exit code. This also applies during automatic copy
+recovery when the UID baseline is unchanged. Reconciliation may download
 same-size candidate messages. It never writes to Gmail.
 
 If there is no match, first check Gmail manually and allow any delayed operation
-to settle. Only after confirming that the uncertain message is absent:
+to settle. Only after independently establishing that the original APPEND cannot
+still complete and confirming that the uncertain message is absent:
 
 ```bash
 python migrate-imap-account-to-gmail.py reconcile --account first@example.com --retry-missing
@@ -348,7 +349,9 @@ Applying first backs up the SQLite ledger to a private
 For an existing exact match, it adds the original migration label and updates
 the ledger to the label's current UID (`restored`), retaining other labels.
 It does not remove Spam/Trash labels or merge source records onto an already
-claimed UID. Confirmed absent messages are uploaded from the source with their
+claimed UID. Destinations with unresolved pending uploads are skipped before
+searching for reusable occurrences; reconcile those uploads first to preserve
+their ownership. Confirmed absent messages are uploaded from the source with their
 original recorded flags/date (`uploaded`). Every new APPEND is durably journaled
 as pending before sending. If acknowledgement is lost, stop and use ordinary
 copy/reconcile recovery before repeating repair; never clear the pending record

@@ -467,7 +467,7 @@ class MigrationTests(unittest.TestCase):
             m.copy_with_recovery(SOURCE, TARGET, self.db, self.args, report)
         return report
 
-    def test_reconnect_after_rejected_connection_retries_missing_without_duplicates(self):
+    def test_unchanged_uidnext_preserves_pending_until_late_append_finishes(self):
         import imaplib
         original = self.dst.append
         attempts = []
@@ -478,11 +478,18 @@ class MigrationTests(unittest.TestCase):
             return original(*args)
         with patch.object(self.dst, "append", side_effect=append):
             report = self.recover()
-        self.assertEqual(report["uploaded"], 2)
-        self.assertEqual(len(attempts), 3)
+        self.assertEqual(report["uploaded"], 0)
+        self.assertEqual(report["problems"], 1)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(self.db.get(("one", "INBOX", 10, 1))["status"], "pending")
+        self.assertEqual(len(self.dst.folders[DEST]), 0)
+        # The original server command completes after the reconnect saw UIDNEXT=1.
+        original(DEST, BODY, [b"\\Seen"], DATE)
+        recovery = self.recover()
+        self.assertEqual(recovery["reconciled"], 1)
+        self.assertEqual(recovery["uploaded"], 1)  # Only source UID 2 is newly sent.
         self.assertEqual(len(self.dst.folders[DEST]), 2)
         self.assertTrue(all(row["status"] == "uploaded" for row in self.db.rows()))
-        self.assertTrue(any(call.args[0] == "retry_safe" for call in m.event.call_args_list))
 
     def test_lost_acknowledgement_reconciles_and_preserves_pilot_limit(self):
         import imaplib
@@ -525,8 +532,9 @@ class MigrationTests(unittest.TestCase):
         self.db.pending(key, DEST, BODY, (), DATE, {b"UIDVALIDITY": 10, b"UIDNEXT": 2})
         report = {"reconciled": 0, "problems": 0}
         m.reconcile(self.dst, self.db, {"one"}, self.args, report, automatic=True)
-        self.assertIsNone(self.db.get(key))
+        self.assertEqual(self.db.get(key)["status"], "pending")
         self.assertEqual(report["reconciled"], 0)
+        self.assertEqual(report["problems"], 1)
         self.assertEqual(len(self.dst.folders[DEST]), 1)
 
     def test_retry_exhaustion_is_bounded_and_backoff_is_capped(self):
@@ -622,16 +630,21 @@ class MigrationTests(unittest.TestCase):
         import imaplib
         self.args.max_retries = 1
         original = self.dst.append
+        original_fetch = self.src.fetch
+        source_failed = []
+        def fetch(uids, fields):
+            if "BODY.PEEK[]" in fields and not source_failed:
+                source_failed.append(True)
+                raise imaplib.IMAP4.abort("EOF before first upload")
+            return original_fetch(uids, fields)
         attempts = []
         def append(*args):
             attempts.append(1)
-            if len(attempts) == 1:
-                raise imaplib.IMAP4.abort("EOF before first upload")
             result = original(*args)
-            if len(attempts) == 3:
+            if len(attempts) == 2:
                 raise imaplib.IMAP4.abort("EOF after accepted second upload")
             return result
-        with patch.object(self.dst, "append", side_effect=append):
+        with patch.object(self.dst, "append", side_effect=append), patch.object(self.src, "fetch", side_effect=fetch):
             report = self.recover()
         self.assertEqual(report["uploaded"], 2)
         self.assertEqual(report["problems"], 0)
@@ -739,7 +752,35 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual([(row["before_validity"], row["before_uidnext"]) for row in rows], [(10, 1), (10, 2)])
         self.dst.calls.clear()
         self.copy()
-        self.assertFalse(any(call[0] == "select" for call in self.dst.calls))
+        self.assertEqual([call for call in self.dst.calls if call[0] == "select"],
+                         [("select", DEST, True)])
+
+    def test_recreated_destination_blocks_new_upload_before_journaling(self):
+        self.copy()
+        self.src.folders["INBOX"][3] = message(BODY + b"new")
+        self.dst.validity = 99
+        self.dst.folders[DEST] = {}
+        self.dst.calls.clear()
+        with self.assertRaisesRegex(m.StopMigration, "Destination UIDVALIDITY changed"):
+            self.copy()
+        self.assertFalse(any(call[0] == "append" for call in self.dst.calls))
+        self.assertIsNone(self.db.get(("one", "INBOX", 10, 3)))
+        self.assertTrue(all(row["target_validity"] == 10 for row in self.db.rows()))
+
+    def test_destination_validity_is_checked_even_when_all_messages_are_recorded(self):
+        self.copy()
+        self.dst.validity = 99
+        with self.assertRaisesRegex(m.StopMigration, "Destination UIDVALIDITY changed"):
+            self.copy()
+
+    def test_missing_saved_destination_is_not_silently_recreated(self):
+        self.copy()
+        del self.dst.folders[DEST]
+        self.dst.calls.clear()
+        with self.assertRaisesRegex(m.StopMigration, "destination folder is missing"):
+            self.copy()
+        self.assertNotIn(DEST, self.dst.folders)
+        self.assertFalse(any(call[0] == "create" for call in self.dst.calls))
 
     def test_each_destination_folder_gets_its_own_fresh_baseline(self):
         self.src.folders["Sent"] = {1: message(BODY + b"sent"), 2: message(BODY + b"sent 2")}
@@ -774,7 +815,7 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertEqual(len(self.dst.folders[DEST]), 2)
         self.assertEqual(self.db.get(("one", "INBOX", 10, 2))["before_uidnext"], 2)
-        self.assertEqual(len([call for call in self.dst.calls if call[0] == "select"]), 2)
+        self.assertEqual(len([call for call in self.dst.calls if call[0] == "select"]), 3)
 
     def test_reconnect_reads_fresh_state_before_next_unseen_message(self):
         import imaplib
@@ -967,6 +1008,25 @@ class RepairTests(unittest.TestCase):
         report = self.run_repair()
         self.assertEqual(report["repairs"][0]["status"], "ambiguous")
         self.assertFalse(any(c[0] in {"append", "label"} for c in self.gmail.calls))
+
+    def test_pending_destination_upload_blocks_repair_before_claiming_its_match(self):
+        # A different source UID has an accepted upload with its response lost.
+        self.db.pending(("one", "INBOX", 10, 3), DEST, BODY, (), DATE,
+                        {b"UIDVALIDITY": 10, b"UIDNEXT": 3})
+        self.gmail.folders[DEST][3] = self.original
+        self.gmail.folders["All Mail"][10] = self.original
+        for apply in (False, True):
+            self.args.apply = apply
+            report = self.run_repair()
+            self.assertEqual(report["repairs"][0]["status"], "ambiguous")
+            self.assertIn("pending uploads", report["repairs"][0]["reason"])
+            self.assertEqual(self.db.get(("one", "INBOX", 10, 1))["target_uid"], 1)
+            self.assertEqual(self.db.get(("one", "INBOX", 10, 3))["status"], "pending")
+        self.assertFalse(any(c[0] in {"gmail_search", "append", "label"} for c in self.gmail.calls))
+        result = {"reconciled": 0, "problems": 0}
+        m.reconcile(self.gmail, self.db, {"one"}, self.args, result, automatic=True)
+        self.assertEqual(result, {"reconciled": 1, "problems": 0})
+        self.assertEqual(self.db.get(("one", "INBOX", 10, 3))["target_uid"], 3)
 
     def test_changed_source_and_uidvalidity_block_repairs(self):
         self.src.folders["INBOX"][1][b"BODY[]"] += b"changed"
